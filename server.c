@@ -24,6 +24,8 @@ typedef struct _server_state{
     char* message; // message to transmit
     int originator; // Client who sent message
     int messages_sent; // number of messages sent
+    bool* has_sent; // Array to keep track of messages sent
+
     pthread_mutex_t msg_lock; // lock to prevent multiple messages being written
     pthread_cond_t msg_cond;
     pthread_cond_t all_sent;
@@ -76,7 +78,14 @@ void* handle_connection(void* server_state_ptr){
         int msg_len;
 
         if(debug) printf("Reading from fd\n");
-        recv(client_fd, (void*)&msg_len, 4, MSG_WAITALL);
+        int init_read = recv(client_fd, (void*)&msg_len, 4, MSG_WAITALL);
+        if(init_read != 4){
+            end_connection(client_fd);
+            state -> current_connections --;
+            new_connection = true;
+            client_fd = accept(state -> server_socket_fd, NULL, NULL);
+            continue;
+        }
 
         msg_len = ntohs(msg_len);
 
@@ -84,7 +93,15 @@ void* handle_connection(void* server_state_ptr){
 
         char* msg = malloc(msg_len);
 
-        recv(client_fd, (void*)msg, msg_len, MSG_WAITALL);
+        size_t recv_read = recv(client_fd, msg, msg_len, MSG_WAITALL);
+        if(recv_read != msg_len){
+            free(msg);
+            close(client_fd);
+            state -> current_connections --;
+            new_connection = true;
+            client_fd = accept(state -> server_socket_fd, NULL, NULL);
+            continue;
+        }
 
         // First byte will be n if it is name connection
         if(msg[0] == 'n'){
@@ -110,6 +127,7 @@ void* handle_connection(void* server_state_ptr){
 
             if(!found_spot){
                 free(name);
+                free(msg);
                 end_connection(client_fd);
                 continue;
             }
@@ -122,34 +140,68 @@ void* handle_connection(void* server_state_ptr){
             state -> current_connections ++;
             write(client_fd, resp, 8);
             if(debug) printf("Send response\n");
+
+            char* template_str = "Client  has connected.";
+            char* send_str = malloc(strlen(template_str) + strlen(name) + 1);
+            sprintf(send_str, "Client %s has connected.", name);
+
+            pthread_mutex_lock(&state ->msg_lock);
+            while(state -> message != NULL){
+                pthread_cond_wait(&state -> all_sent, &state -> msg_lock);
+            }
+            // Send message like Client [name] has connected.
+            printf("Notifying that %s has connected.\n", name);
+            state -> message = send_str;
+            state -> originator = client_id;
+            pthread_cond_broadcast(&state -> msg_cond);
+            pthread_mutex_unlock(&state -> msg_lock);
         } else if(strncmp(msg, "c", 1) == 0){ // Close connection
             int client_id;
 
             client_id = ntohs(*(int*)(msg + 1));
+            char* client_name = state -> client_names[client_id];
 
             printf("Client %d closes\n", client_id);
+
+            char* template = "Client  has disconnected.";
+            char* discon_message = malloc(strlen(client_name) + strlen(template) + 1);
+            sprintf(discon_message, "Client %s has disconnected.", client_name);
+
+            printf("Created discon str: %s\n", discon_message);
 
             if(state->client_names[client_id] != NULL){
                 free(state->client_names[client_id]);
             }
 
+            state -> client_names[client_id] = NULL;
+
             state->client_socket_fds[client_id] = 0;
             state -> current_connections --;
             close(client_fd);
+
+            printf("Freed data\n");
+
+            pthread_mutex_lock(&state -> msg_lock);
+            while(state -> message != NULL){
+                pthread_cond_wait(&state -> all_sent, &state -> msg_lock);
+            }
+            printf("Setting message: %s from %d\n", discon_message, client_id);
+            state -> message = discon_message;
+            state -> originator = client_id;
+            pthread_cond_broadcast(&state -> msg_cond);
+            pthread_mutex_unlock(&state -> msg_lock);
             client_fd = accept(state -> server_socket_fd, NULL, NULL);
-            continue;
-        } else{ // Recieving Message, first byte is client id
+        } else if(msg[0] == 'm'){ // Recieving Message, first byte is client id
             int client_id;
             printf("Determining client id\n");
 
-            client_id = ntohs(*((int*)msg));
+            client_id = ntohs(*((int*)(msg + 1)));
 
             char* client_name = state->client_names[client_id];
 
              printf("Client id is %d, name is %s\n", client_id, client_name);
-            char* client_message = malloc(msg_len - 4);
-            strcpy(client_message, msg + 4);
-            free(msg);
+            char* client_message = malloc(msg_len - 5);
+            strcpy(client_message, msg + 5);
             
 
             printf("Recieved message from %s: %s\n", client_name, client_message);
@@ -162,7 +214,11 @@ void* handle_connection(void* server_state_ptr){
             state -> originator = client_id;
             pthread_cond_broadcast(&state -> msg_cond);
             pthread_mutex_unlock(&state -> msg_lock);
+        } else{
+            printf("%s is invalid\n", msg);
         }
+
+        free(msg);
     }
     return NULL;
 }
@@ -172,28 +228,45 @@ void* send_message(void* sender_state_ptr){
     sender_state* send_state = sender_state_ptr;
 
     int client_responsible_id = send_state -> connection_handled;
-    printf("Message thread for %d initialized\n", send_state -> connection_handled);
 
     while(1){
         pthread_mutex_lock(&send_state -> s_state -> msg_lock);
         while(
             send_state -> s_state -> client_names[client_responsible_id] == NULL || 
             send_state -> s_state -> message == NULL || 
-            send_state -> s_state -> messages_sent == send_state ->s_state ->current_connections - 1 ||
+            send_state -> s_state -> has_sent[client_responsible_id] ||
             send_state -> s_state -> originator == client_responsible_id
         ){
             pthread_cond_wait(&send_state -> s_state ->msg_cond, &send_state -> s_state -> msg_lock);
-            if(send_state -> s_state -> originator == client_responsible_id && send_state -> s_state -> current_connections == 1){
+            if(
+                send_state -> s_state -> current_connections == 0 ||
+                (send_state -> s_state -> client_names[client_responsible_id] != NULL &&
+                send_state -> s_state -> originator == client_responsible_id && 
+                send_state -> s_state -> current_connections == 1)
+            ){
+                printf("No one to hear, clearing out message\n");
                 free(send_state -> s_state -> message);
                 send_state -> s_state -> message = NULL;
             }
+            printf(
+                "Client name %s, message %s, has sent %d, orign %d, current cons %zu\n", 
+                send_state -> s_state -> client_names[client_responsible_id],
+                send_state -> s_state -> message,
+                send_state -> s_state -> has_sent[client_responsible_id],
+                send_state -> s_state -> originator,
+                send_state -> s_state -> current_connections
+            );
         }
         send_state -> s_state ->messages_sent ++;
+        send_state -> s_state -> has_sent[client_responsible_id] = true;
         pthread_mutex_unlock(&send_state->s_state->msg_lock);
 
 
         int client_socket_fd = send_state -> s_state -> client_socket_fds[client_responsible_id];
-        char* client_name = send_state -> s_state -> client_names[client_responsible_id];
+        char* client_name = send_state -> s_state -> client_names[send_state -> s_state -> originator];
+        if(client_name == NULL){
+            client_name = "Server";
+        }
 
         char* message = send_state -> s_state -> message;
         //Format like [name] says: [message]
@@ -207,15 +280,24 @@ void* send_message(void* sender_state_ptr){
 
         printf("Sending message %s from %s to client number %d\n", send_message + 4, client_name, client_responsible_id);
         write(client_socket_fd, send_message, 4 + message_len);
+        printf("Successfully sent message #%d\n", send_state -> s_state -> messages_sent);
 
         pthread_mutex_lock(&send_state -> s_state -> msg_lock);
-        if(send_state -> s_state -> messages_sent == send_state -> s_state -> current_connections - 1){
+        printf("Determining if message to %d is last message\n", client_responsible_id);
+        if(
+            send_state -> s_state -> messages_sent >= send_state -> s_state -> current_connections - 1 
+        ){
+            printf("Message to %d is the last one, deleting data\n", client_responsible_id);
             free(send_state -> s_state -> message);
             send_state -> s_state -> message = NULL;
+            send_state -> s_state -> originator = -1;
             send_state -> s_state -> messages_sent = 0;
+            bzero(send_state -> s_state -> has_sent, sizeof(bool)*MAX_CONNECTIONS);
             pthread_cond_broadcast(&send_state -> s_state -> all_sent);
         }
         pthread_mutex_unlock(&send_state -> s_state -> msg_lock);
+
+        free(send_message);
     }
     return NULL;
 }
@@ -281,6 +363,12 @@ int main(int argc, char** argv){
     state.msg_cond = cond;
     state.all_sent = all_sent;
 
+    bool* block = malloc(sizeof(bool)*MAX_CONNECTIONS);
+    bzero(block, sizeof(bool)*MAX_CONNECTIONS);
+
+    state.has_sent = block;
+    s = &state;
+
     pthread_t threads[LISTEN_THREADS];
     for(int i = 0; i < LISTEN_THREADS; i++){
         pthread_t thread;
@@ -310,8 +398,6 @@ int main(int argc, char** argv){
     for(int i = 0; i < MAX_CONNECTIONS; i++){
         pthread_join(send_threads[i], NULL);
     }
-
-    s = &state;
 
     return 0;
 }
