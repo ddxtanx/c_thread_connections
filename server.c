@@ -306,8 +306,21 @@ int main(int argc, char** argv){
     int socketfd = socket(AF_INET, SOCK_STREAM, 0);
 
     struct in_addr local_addr;
+    int c;
+    char* local_ip = "127.0.0.1";
+    int local_port = 65535;
+    while((c = getopt(argc, argv, "h:p:")) != -1){
+        switch(c){
+            case 'h':
+                local_ip = optarg;
+            case 'p':
+                local_port = atoi(optarg);
+        }
+    }
 
-    const char* local_ip = "127.0.0.1";
+    printf("IP %s port %d\n", local_ip, local_port);
+
+    
 
     int ip_cast = inet_aton(local_ip, &local_addr);
     if(ip_cast == 0){
@@ -318,7 +331,7 @@ int main(int argc, char** argv){
     struct sockaddr_in sock_bind;
 
     sock_bind.sin_family = AF_INET;
-    sock_bind.sin_port = 65535;
+    sock_bind.sin_port = local_port;
     sock_bind.sin_addr = local_addr;
 
     int bindstatus = bind(socketfd, (const struct sockaddr*)&sock_bind, sizeof(struct sockaddr_in));
