@@ -299,9 +299,15 @@ int main(int argc, char** argv){
     while((c = getopt(argc, argv, "h:p:")) != -1){
         switch(c){
             case 'h':
-                local_ip = optarg;
+                if(optarg != NULL){
+                    local_ip = optarg;
+                }
+                break;
             case 'p':
-                local_port = atoi(optarg);
+                if(optarg != NULL){
+                    local_port = atoi(optarg);
+                }
+                break;
         }
     }
 
