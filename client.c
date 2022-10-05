@@ -99,6 +99,9 @@ void* write_message_handler(void* client_state_ptr){
             pthread_cond_wait(&state -> waiting_msg_cond, &state -> write_lock);
         }
         char* msg = malloc(MAX_MESSAGE_SIZE);
+        msg[0] = '\0';
+        state -> message = msg;
+        state -> message_len = 0;
         if(!(state -> has_prompt)){
             printf("Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
             state -> has_prompt = true;
@@ -106,19 +109,20 @@ void* write_message_handler(void* client_state_ptr){
         
         pthread_mutex_unlock(&state -> write_lock);
         int c = fgetc(stdin);
-
-        pthread_mutex_lock(&state -> write_lock);
-        printf("%c", c);
         size_t real_size = 0;
 
         
         state -> is_writing = true;
         msg[0] = c;
-        for(int i = 1; i < MAX_MESSAGE_SIZE; i++){
-            real_size++;
+        printf("%c", c);
+        msg[1] = '\0';
+        for(int i = 1; i < MAX_MESSAGE_SIZE-1; i++){
             int c = fgetc(stdin);
+            pthread_mutex_lock(&state -> write_lock);
+            real_size++;
             if(c == EOF || c == '\n'){
                 printf("\r");
+                pthread_mutex_unlock(&state -> write_lock);
                 break;
             } else if((c == 127 || c == 8) && i != 0){ // backspace or delete
                 msg[i-1] = '\0';
@@ -127,8 +131,10 @@ void* write_message_handler(void* client_state_ptr){
                 i -= 2;
             } else{
                 msg[i] = c;
+                msg[i+1] = '\0';
                 printf("%c", c);
             }
+            pthread_mutex_unlock(&state -> write_lock);
         }
         state -> is_writing = false;
         msg = realloc(msg, real_size + 1);
@@ -145,28 +151,21 @@ void* write_message_handler(void* client_state_ptr){
         if(real_message_len < total_message_len){
             diff = total_message_len - real_message_len;
         }
-        char* self_message = malloc(real_message_len + diff + 1);
         
-        sprintf(
-            self_message,
-            "%s: %s%*s", 
+        printf(
+            "%s: %s%*s\n", 
             state -> client_name, 
             msg,
             diff,
             ""
         );
 
-        while(state -> num_in_queue == MAX_MESSAGE_QUEUE_SIZE){
-            pthread_cond_wait(&state -> full_queue_cond, &state -> write_lock);
-        }
+        state -> has_prompt = false;
 
-        state -> messages_queue[state -> num_in_queue] = self_message;
-        state -> num_in_queue ++;
+        pthread_mutex_lock(&state -> write_lock);
         
-        state -> message = msg;
         state -> message_len = real_size + 1;
         pthread_cond_broadcast(&state -> can_send_cond);
-        pthread_cond_broadcast(&state -> can_print_cond);
         pthread_mutex_unlock(&state -> write_lock);
     }
     return NULL;
@@ -178,7 +177,7 @@ void* send_message_handler(void* client_state_ptr){ //formatted like [len]m[clie
 
     while(1){
         pthread_mutex_lock(&state -> write_lock);
-        while(state -> message == NULL){
+        while(state -> message == NULL || state -> message_len == 0){
             pthread_cond_wait(&state -> can_send_cond, &state -> write_lock);
         }
         char* msg = state -> message;
@@ -213,12 +212,17 @@ void* print_message_handler(void* client_state_ptr){
 
     while(1){
         pthread_mutex_lock(&state -> write_lock);
-        while(state -> num_in_queue == 0 || state -> is_writing){
+        while(state -> num_in_queue == 0){
             pthread_cond_wait(&state -> can_print_cond, &state -> write_lock);
         }
         for(int i = 0; i < state -> num_in_queue; i++){
             char* message = state -> messages_queue[i]; 
-            size_t templ_len = snprintf(NULL, 0, "Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+            size_t templ_len;
+            if(state -> message != NULL){
+                templ_len = snprintf(NULL, 0, "Enter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, state -> message);
+            } else{
+                templ_len = snprintf(NULL, 0, "Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+            }
             size_t mes_len = strlen(message);
             size_t diff = 0;
             if(templ_len > mes_len){
@@ -226,7 +230,13 @@ void* print_message_handler(void* client_state_ptr){
             }
 
             printf("\r%s%*s\n", message, diff, "");
-            printf("Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+            fflush(stdout);
+            if(state -> message != NULL){
+                printf("Enter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, state -> message);
+            } else{
+                printf("Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+            }
+            
             state -> has_prompt = true;
             fflush(stdout);
             free(message);
