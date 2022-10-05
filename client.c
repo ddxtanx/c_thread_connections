@@ -118,11 +118,11 @@ void* write_message_handler(void* client_state_ptr){
             real_size++;
             int c = fgetc(stdin);
             if(c == EOF || c == '\n'){
-                printf("\n");
-                state -> has_prompt = false;
+                printf("\r");
                 break;
-            } else if(c == 127 || c == 8){ // backspace or delete
+            } else if((c == 127 || c == 8) && i != 0){ // backspace or delete
                 msg[i-1] = '\0';
+                printf("\rEnter a message (max size %zu, quit to end): %s ", MAX_MESSAGE_SIZE, msg);
                 printf("\rEnter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, msg);
                 i -= 2;
             } else{
@@ -138,14 +138,22 @@ void* write_message_handler(void* client_state_ptr){
             free(msg);
             break;
         }
-        char* templ_str = " says: ";
-        char* self_message = malloc(strlen(templ_str) + strlen(state -> client_name) + real_size + 1);
+        char* templ_str = ": ";
+        size_t total_message_len = snprintf(NULL, 0, "\rEnter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, msg);
+        size_t real_message_len = strlen(templ_str) + strlen(state -> client_name) + real_size;
+        size_t diff = 0;
+        if(real_message_len < total_message_len){
+            diff = total_message_len - real_message_len;
+        }
+        char* self_message = malloc(real_message_len + diff + 1);
         
         sprintf(
             self_message,
-            "%s says: %s", 
+            "%s: %s%*s", 
             state -> client_name, 
-            msg
+            msg,
+            diff,
+            ""
         );
 
         while(state -> num_in_queue == MAX_MESSAGE_QUEUE_SIZE){
@@ -210,7 +218,14 @@ void* print_message_handler(void* client_state_ptr){
         }
         for(int i = 0; i < state -> num_in_queue; i++){
             char* message = state -> messages_queue[i]; 
-            printf("\r%s                                   \n", message);
+            size_t templ_len = snprintf(NULL, 0, "Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+            size_t mes_len = strlen(message);
+            size_t diff = 0;
+            if(templ_len > mes_len){
+                diff = templ_len - mes_len;
+            }
+
+            printf("\r%s%*s\n", message, diff, "");
             printf("Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
             state -> has_prompt = true;
             fflush(stdout);

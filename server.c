@@ -349,12 +349,12 @@ void* send_message(void* sender_state_ptr){
         char* message = send_state -> s_state -> message;
         //Format like [name] says: [message]
 
-        size_t message_len = strlen(client_name) + strlen(" says: ") + strlen(message) + 1;
+        size_t message_len = strlen(client_name) + strlen(": ") + strlen(message) + 1;
 
         char* send_message = malloc(4 + message_len);
 
         *((int*)send_message) = htons(message_len);
-        sprintf(send_message+4, "%s says: %s", client_name, message);
+        sprintf(send_message+4, "%s: %s", client_name, message);
 
         printf("Sending message %s from %s to client number %d\n", send_message + 4, client_name, client_responsible_id);
         write(client_socket_fd, send_message, 4 + message_len);
