@@ -86,7 +86,7 @@ void* server_message_handler(void* client_state_ptr){
         pthread_cond_broadcast(&state -> can_print_cond);
         pthread_mutex_unlock(&state -> recv_lock);
     }
-
+    return NULL;
 }
 
 void* write_message_handler(void* client_state_ptr){
@@ -255,6 +255,7 @@ void init_state(client_state* s, int socketfd, char* name){
 
     s->num_in_queue = 0;
     s->is_writing = false;
+    s -> has_prompt = false;
 
     s -> message = NULL;
 }
