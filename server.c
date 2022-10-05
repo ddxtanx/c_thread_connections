@@ -14,6 +14,8 @@
 size_t MAX_CONNECTIONS = 5;
 size_t LISTEN_THREADS = 5;
 bool debug = true;
+pthread_t* recv_threads = NULL;
+pthread_t* send_threads = NULL;
 
 typedef struct _server_state{
     int server_socket_fd; // File descriptor for servers socket
@@ -25,6 +27,7 @@ typedef struct _server_state{
     int originator; // Client who sent message
     int messages_sent; // number of messages sent
     bool* has_sent; // Array to keep track of messages sent
+    bool canceled;
 
     pthread_mutex_t msg_lock; // lock to prevent multiple messages being written
     pthread_cond_t msg_cond;
@@ -46,19 +49,97 @@ void end_connection(int client_fd){
     // If client cannot connect, sends null message and closes connection
 }
 
-void interrupt(int signum){
-    if(s != NULL){
-        for(int i = 0; i < MAX_CONNECTIONS; i++){
+void initialize_server_state(server_state* s, int socketfd){
+    s ->server_socket_fd = socketfd;
+    
+    int* connection_socket_fds = malloc(sizeof(int)*MAX_CONNECTIONS);
+    bzero(connection_socket_fds, MAX_CONNECTIONS*sizeof(int));
+
+    s ->client_socket_fds = connection_socket_fds;
+    s ->current_connections = 0;
+
+    char** client_names = malloc(MAX_CONNECTIONS*sizeof(char*));
+    bzero(client_names, MAX_CONNECTIONS*sizeof(char*));
+
+    s ->client_names = client_names;
+
+    s ->message = NULL;
+    s ->originator = -1;
+
+    s ->messages_sent = 0;
+
+    pthread_mutex_t lock;
+    pthread_mutex_init(&lock, NULL);
+
+    pthread_cond_t cond;
+    pthread_cond_init(&cond, NULL);
+
+    pthread_cond_t all_sent;
+    pthread_cond_init(&all_sent, NULL);
+
+    s ->msg_lock = lock;
+    s ->msg_cond = cond;
+    s ->all_sent = all_sent;
+
+    bool* block = malloc(sizeof(bool)*MAX_CONNECTIONS);
+    bzero(block, sizeof(bool)*MAX_CONNECTIONS);
+
+    s ->has_sent = block;
+    s -> canceled = false;
+}
+
+void destroy_server_state(server_state* s){
+    if(s -> client_names != NULL){
+        for(int i = 0; i<MAX_CONNECTIONS; i++){
             if(s -> client_names[i] != NULL){
                 end_connection(s -> client_socket_fds[i]);
+                free(s -> client_names[i]);
+                s -> client_names[i] = NULL;
             }
         }
     }
-    signal(SIGINT, SIG_DFL);
-    raise(SIGINT);
+    
+    s -> canceled = true;
+    free(s -> client_names);
+    s -> client_names = NULL;
+
+    free(s -> has_sent);
+    s -> has_sent = NULL;
+
+    free(s -> client_socket_fds);
+    s -> client_socket_fds = NULL;
+
+    pthread_mutex_unlock(&s -> msg_lock);
+    pthread_mutex_destroy(&s -> msg_lock);
+
+    pthread_cond_broadcast(&s -> msg_cond);
+    pthread_cond_destroy(&s -> msg_cond);
+
+    pthread_cond_broadcast(&s -> all_sent);
+    pthread_cond_destroy(&s -> all_sent);
+
+}
+
+void interrupt(int signum){
+    if(recv_threads != NULL){
+        for(int i = 0; i < LISTEN_THREADS; i++){
+            pthread_cancel(recv_threads[i]);
+        }
+    }
+    if(send_threads != NULL){
+        for(int i = 0; i < MAX_CONNECTIONS; i++){
+            pthread_cancel(send_threads[i]);
+        }
+    }
+    if(s != NULL){
+        destroy_server_state(s);
+    }
+    
+    exit(signum);
 }
 
 void* handle_connection(void* server_state_ptr){
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
     server_state* state = (server_state*)server_state_ptr;
 
     int client_fd = accept(state -> server_socket_fd, NULL, NULL);
@@ -78,7 +159,7 @@ void* handle_connection(void* server_state_ptr){
         int msg_len;
 
         if(debug) printf("Reading from fd\n");
-        int init_read = recv(client_fd, (void*)&msg_len, 4, MSG_WAITALL);
+        int init_read = read(client_fd, (void*)&msg_len, 4);
         if(init_read != 4){
             end_connection(client_fd);
             state -> current_connections --;
@@ -93,7 +174,7 @@ void* handle_connection(void* server_state_ptr){
 
         char* msg = malloc(msg_len);
 
-        size_t recv_read = recv(client_fd, msg, msg_len, MSG_WAITALL);
+        size_t recv_read = read(client_fd, msg, msg_len);
         if(recv_read != msg_len){
             free(msg);
             close(client_fd);
@@ -224,7 +305,7 @@ void* handle_connection(void* server_state_ptr){
 }
 
 void* send_message(void* sender_state_ptr){
-    signal(SIGINT, interrupt);
+    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
     sender_state* send_state = sender_state_ptr;
 
     int client_responsible_id = send_state -> connection_handled;
@@ -232,6 +313,7 @@ void* send_message(void* sender_state_ptr){
     while(1){
         pthread_mutex_lock(&send_state -> s_state -> msg_lock);
         while(
+            !send_state -> s_state -> canceled &&
             send_state -> s_state -> client_names[client_responsible_id] == NULL || 
             send_state -> s_state -> message == NULL || 
             send_state -> s_state -> has_sent[client_responsible_id] ||
@@ -244,18 +326,14 @@ void* send_message(void* sender_state_ptr){
                 send_state -> s_state -> originator == client_responsible_id && 
                 send_state -> s_state -> current_connections == 1)
             ){
-                printf("No one to hear, clearing out message\n");
                 free(send_state -> s_state -> message);
                 send_state -> s_state -> message = NULL;
             }
-            printf(
-                "Client name %s, message %s, has sent %d, orign %d, current cons %zu\n", 
-                send_state -> s_state -> client_names[client_responsible_id],
-                send_state -> s_state -> message,
-                send_state -> s_state -> has_sent[client_responsible_id],
-                send_state -> s_state -> originator,
-                send_state -> s_state -> current_connections
-            );
+            
+        }
+        if(send_state -> s_state -> canceled){
+            pthread_mutex_unlock(&send_state -> s_state -> msg_lock);
+            break;
         }
         send_state -> s_state ->messages_sent ++;
         send_state -> s_state -> has_sent[client_responsible_id] = true;
@@ -303,6 +381,7 @@ void* send_message(void* sender_state_ptr){
 }
 
 int main(int argc, char** argv){
+    signal(SIGINT, interrupt);
     int socketfd = socket(AF_INET, SOCK_STREAM, 0);
 
     struct in_addr local_addr;
@@ -351,44 +430,11 @@ int main(int argc, char** argv){
     }
 
     server_state state;
-    state.server_socket_fd = socketfd;
-    
-    int connection_socket_fds[MAX_CONNECTIONS];
-    bzero(connection_socket_fds, MAX_CONNECTIONS*sizeof(int));
-
-    state.client_socket_fds = connection_socket_fds;
-    state.current_connections = 0;
-
-    char* client_names[MAX_CONNECTIONS];
-    bzero(client_names, MAX_CONNECTIONS*sizeof(char*));
-
-    state.client_names = client_names;
-
-    state.message = NULL;
-    state.originator = -1;
-
-    state.messages_sent = 0;
-
-    pthread_mutex_t lock;
-    pthread_mutex_init(&lock, NULL);
-
-    pthread_cond_t cond;
-    pthread_cond_init(&cond, NULL);
-
-    pthread_cond_t all_sent;
-    pthread_cond_init(&all_sent, NULL);
-
-    state.msg_lock = lock;
-    state.msg_cond = cond;
-    state.all_sent = all_sent;
-
-    bool* block = malloc(sizeof(bool)*MAX_CONNECTIONS);
-    bzero(block, sizeof(bool)*MAX_CONNECTIONS);
-
-    state.has_sent = block;
+    initialize_server_state(&state, socketfd);
     s = &state;
 
     pthread_t threads[LISTEN_THREADS];
+    recv_threads = threads;
     for(int i = 0; i < LISTEN_THREADS; i++){
         pthread_t thread;
         pthread_create(&thread, NULL, &handle_connection, (void*)&state);
@@ -402,21 +448,17 @@ int main(int argc, char** argv){
         s.connection_handled = i;
         sender_states[i] = s;
     }
-    pthread_t send_threads[MAX_CONNECTIONS];
+    pthread_t sender_threads[MAX_CONNECTIONS];
+    send_threads = sender_threads;
     for(int i = 0; i < MAX_CONNECTIONS; i++){
         pthread_t thread;
         
         pthread_create(&thread, NULL, &send_message, (void*)&sender_states[i]);
-        send_threads[i] = thread;
+        sender_threads[i] = thread;
     }
 
-    for(int i = 0; i < LISTEN_THREADS; i++){
-        pthread_join(threads[i], NULL);
-    }
-
-    for(int i = 0; i < MAX_CONNECTIONS; i++){
-        pthread_join(send_threads[i], NULL);
-    }
+    pthread_join(threads[0], NULL);
+    printf("After 0\n");
 
     return 0;
 }

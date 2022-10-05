@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <termios.h>
 
 bool debug = false;
 size_t MAX_MESSAGE_SIZE = 256;
@@ -19,6 +20,7 @@ pthread_t* input_thread_ptr = NULL;
 pthread_t* network_recv_thread_ptr = NULL;
 pthread_t* network_send_thread_ptr = NULL;
 pthread_t* print_msg_thread_ptr = NULL;
+struct termios orig_state;
 
 
 typedef struct _client_state{
@@ -30,12 +32,15 @@ typedef struct _client_state{
     size_t num_in_queue;
 
     bool is_writing;
+    bool has_prompt;
     char* message;
     size_t message_len;
 
     bool exited;
 
     pthread_mutex_t write_lock;
+    pthread_mutex_t recv_lock;
+
     pthread_cond_t can_print_cond;
     pthread_cond_t waiting_msg_cond;
     pthread_cond_t can_send_cond;
@@ -70,16 +75,16 @@ void* server_message_handler(void* client_state_ptr){
         char* server_msg = malloc(new_msg_len);
         recv(socketfd, server_msg, new_msg_len, MSG_WAITALL);
 
-        pthread_mutex_lock(&state -> write_lock);
+        pthread_mutex_lock(&state -> recv_lock);
         while(state -> num_in_queue == MAX_MESSAGE_QUEUE_SIZE){
-            pthread_cond_wait(&state -> full_queue_cond, &state -> write_lock);
+            pthread_cond_wait(&state -> full_queue_cond, &state -> recv_lock);
         }
         size_t free_index = state -> num_in_queue;
         //printf("Recieved message %s\n", server_msg);
         state -> messages_queue[free_index] = server_msg;
         state -> num_in_queue ++;
         pthread_cond_broadcast(&state -> can_print_cond);
-        pthread_mutex_unlock(&state -> write_lock);
+        pthread_mutex_unlock(&state -> recv_lock);
     }
 
 }
@@ -94,34 +99,66 @@ void* write_message_handler(void* client_state_ptr){
             pthread_cond_wait(&state -> waiting_msg_cond, &state -> write_lock);
         }
         char* msg = malloc(MAX_MESSAGE_SIZE);
-        printf("Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+        if(!(state -> has_prompt)){
+            printf("Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+            state -> has_prompt = true;
+        }
+        
         pthread_mutex_unlock(&state -> write_lock);
         int c = fgetc(stdin);
-        size_t real_size = 0;
 
         pthread_mutex_lock(&state -> write_lock);
+        printf("%c", c);
+        size_t real_size = 0;
+
+        
         state -> is_writing = true;
         msg[0] = c;
         for(int i = 1; i < MAX_MESSAGE_SIZE; i++){
             real_size++;
             int c = fgetc(stdin);
             if(c == EOF || c == '\n'){
+                printf("\n");
+                state -> has_prompt = false;
                 break;
+            } else if(c == 127 || c == 8){ // backspace or delete
+                msg[i-1] = '\0';
+                printf("\rEnter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, msg);
+                i -= 2;
+            } else{
+                msg[i] = c;
+                printf("%c", c);
             }
-            msg[i] = c;
         }
+        state -> is_writing = false;
         msg = realloc(msg, real_size + 1);
+        msg[real_size] = '\0';
 
-        printf("%s says: %s\n", state -> client_name, msg);
         if(strcmp(msg, "quit") == 0){
             free(msg);
             break;
         }
-        msg[real_size] = '\0';
+        char* templ_str = " says: ";
+        char* self_message = malloc(strlen(templ_str) + strlen(state -> client_name) + real_size + 1);
+        
+        sprintf(
+            self_message,
+            "%s says: %s", 
+            state -> client_name, 
+            msg
+        );
+
+        while(state -> num_in_queue == MAX_MESSAGE_QUEUE_SIZE){
+            pthread_cond_wait(&state -> full_queue_cond, &state -> write_lock);
+        }
+
+        state -> messages_queue[state -> num_in_queue] = self_message;
+        state -> num_in_queue ++;
+        
         state -> message = msg;
         state -> message_len = real_size + 1;
-        state -> is_writing = false;
         pthread_cond_broadcast(&state -> can_send_cond);
+        pthread_cond_broadcast(&state -> can_print_cond);
         pthread_mutex_unlock(&state -> write_lock);
     }
     return NULL;
@@ -175,6 +212,7 @@ void* print_message_handler(void* client_state_ptr){
             char* message = state -> messages_queue[i]; 
             printf("\r%s                                   \n", message);
             printf("Enter a message (max size %zu, quit to end): ", MAX_MESSAGE_SIZE);
+            state -> has_prompt = true;
             fflush(stdout);
             free(message);
             state -> messages_queue[i] = NULL;
@@ -191,6 +229,7 @@ void init_state(client_state* s, int socketfd, char* name){
     s -> client_name = name;
 
     pthread_mutex_t lock;
+    pthread_mutex_t lock2;
     pthread_cond_t cond_1;
     pthread_cond_t cond_2;
     pthread_cond_t cond_3;
@@ -201,8 +240,10 @@ void init_state(client_state* s, int socketfd, char* name){
     pthread_cond_init(&cond_3, NULL);
     pthread_cond_init(&cond_4, NULL);
     pthread_mutex_init(&lock, NULL);
+    pthread_mutex_init(&lock2, NULL);
 
     s->write_lock = lock;
+    s -> recv_lock = lock2;
     s->can_print_cond = cond_1;
     s->full_queue_cond = cond_2;
     s->waiting_msg_cond = cond_3;
@@ -236,6 +277,9 @@ void destroy_state(client_state* s){
 
     pthread_mutex_unlock(&s -> write_lock);
     pthread_mutex_destroy(&s -> write_lock);
+
+    pthread_mutex_unlock(&s -> recv_lock);
+    pthread_mutex_destroy(&s -> recv_lock);
 
     pthread_cond_broadcast(&s -> can_print_cond);
     pthread_cond_destroy(&s -> can_print_cond);
@@ -283,12 +327,14 @@ void sigint_handler(int signum){
     if(print_msg_thread_ptr != NULL){
         pthread_cancel(*print_msg_thread_ptr);
     }
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_state);
     exit(signum);
 }
 
 int main(int argc, char** argv){
     signal(SIGINT, sigint_handler);
     signal(SIGSEGV, sigint_handler);
+
     int socketfd = socket(AF_INET, SOCK_STREAM, 0);
 
     struct in_addr local_addr;
@@ -332,6 +378,14 @@ int main(int argc, char** argv){
     
     printf("Name (max 1000 letters): ");
     fgets(name, MAX_MESSAGE_SIZE, stdin);
+
+    tcgetattr(STDIN_FILENO, &orig_state);
+
+    struct termios term_state = orig_state;
+    
+    term_state.c_lflag &= ~(ECHO | ICANON);
+
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &term_state);
 
     size_t name_len = strlen(name);
 
@@ -436,6 +490,7 @@ int main(int argc, char** argv){
     pthread_join(input_thread, NULL);
 
     destroy_state(&s);
+    tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_state);
 
     exit(0);
     return 0;
