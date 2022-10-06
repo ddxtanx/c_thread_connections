@@ -1,6 +1,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -109,7 +110,7 @@ void* write_message_handler(void* client_state_ptr){
         
         pthread_mutex_unlock(&state -> write_lock);
         int c = fgetc(stdin);
-        size_t real_size = 0;
+        size_t real_size = 1;
 
         
         state -> is_writing = true;
@@ -119,7 +120,6 @@ void* write_message_handler(void* client_state_ptr){
         for(int i = 1; i < MAX_MESSAGE_SIZE-1; i++){
             int c = fgetc(stdin);
             pthread_mutex_lock(&state -> write_lock);
-            real_size++;
             if(c == EOF || c == '\n'){
                 printf("\r");
                 pthread_mutex_unlock(&state -> write_lock);
@@ -128,16 +128,19 @@ void* write_message_handler(void* client_state_ptr){
                 msg[i-1] = '\0';
                 printf("\rEnter a message (max size %zu, quit to end): %s ", MAX_MESSAGE_SIZE, msg);
                 printf("\rEnter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, msg);
+                real_size--;
                 i -= 2;
-            } else{
+            } else if (isprint(c)){
                 msg[i] = c;
                 msg[i+1] = '\0';
+                real_size++;
                 printf("%c", c);
+            } else{ // Non visible char, dont print
+                i--;
             }
             pthread_mutex_unlock(&state -> write_lock);
         }
         state -> is_writing = false;
-        msg = realloc(msg, real_size + 1);
         msg[real_size] = '\0';
 
         if(strcmp(msg, "quit") == 0){
