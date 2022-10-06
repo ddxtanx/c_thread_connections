@@ -89,6 +89,7 @@ void initialize_server_state(server_state* s, int socketfd){
 }
 
 void destroy_server_state(server_state* s){
+    printf("Destroying state\n");
     if(s -> client_names != NULL){
         for(int i = 0; i<MAX_CONNECTIONS; i++){
             if(s -> client_names[i] != NULL){
@@ -117,10 +118,13 @@ void destroy_server_state(server_state* s){
 
     pthread_cond_broadcast(&s -> all_sent);
     pthread_cond_destroy(&s -> all_sent);
-
+    printf("Destroyed state\n");
 }
 
 void interrupt(int signum){
+    if(s != NULL){
+        s -> canceled = true;
+    }
     if(recv_threads != NULL){
         for(int i = 0; i < LISTEN_THREADS; i++){
             pthread_cancel(recv_threads[i]);
@@ -135,11 +139,10 @@ void interrupt(int signum){
         destroy_server_state(s);
     }
     
-    exit(signum);
-}
+}   
 
 void* handle_connection(void* server_state_ptr){
-    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+   // pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
     server_state* state = (server_state*)server_state_ptr;
 
     int client_fd = accept(state -> server_socket_fd, NULL, NULL);
@@ -152,6 +155,11 @@ void* handle_connection(void* server_state_ptr){
             client_fd = accept(state -> server_socket_fd, NULL, NULL);
             continue;
             // If client cannot connect, sends null message and closes connection
+        }
+
+        if(state -> canceled){
+            end_connection(client_fd);
+            break;
         }
         new_connection = false;
 
@@ -301,11 +309,11 @@ void* handle_connection(void* server_state_ptr){
 
         free(msg);
     }
-    return NULL;
+    pthread_exit(NULL);
 }
 
 void* send_message(void* sender_state_ptr){
-    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+    //pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
     sender_state* send_state = sender_state_ptr;
 
     int client_responsible_id = send_state -> connection_handled;
@@ -377,7 +385,7 @@ void* send_message(void* sender_state_ptr){
 
         free(send_message);
     }
-    return NULL;
+    pthread_exit(NULL);
 }
 
 int main(int argc, char** argv){
@@ -458,7 +466,8 @@ int main(int argc, char** argv){
     }
 
     pthread_join(threads[0], NULL);
-    printf("After 0\n");
+    pthread_join(recv_threads[0], NULL);
+
 
     return 0;
 }
