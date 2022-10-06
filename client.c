@@ -126,7 +126,7 @@ void* write_message_handler(void* client_state_ptr){
                 printf("\rEnter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, msg);
                 real_size--;
                 i -= 2;
-            } else if ((isalnum(c) || ispunct(c)) && !iscntrl(c)){
+            } else if ((isalnum(c) || ispunct(c) || c == ' ') && !iscntrl(c)){
                 msg[i] = c;
                 msg[i+1] = '\0';
                 real_size++;
