@@ -109,16 +109,12 @@ void* write_message_handler(void* client_state_ptr){
         }
         
         pthread_mutex_unlock(&state -> write_lock);
-        int c = fgetc(stdin);
-        size_t real_size = 1;
+        size_t real_size = 0;
 
-        
-        state -> is_writing = true;
-        msg[0] = c;
-        printf("%c", c);
-        msg[1] = '\0';
-        for(int i = 1; i < MAX_MESSAGE_SIZE-1; i++){
+    
+        for(int i = 0; i < MAX_MESSAGE_SIZE-1; i++){
             int c = fgetc(stdin);
+            state -> is_writing = true;
             pthread_mutex_lock(&state -> write_lock);
             if(c == EOF || c == '\n'){
                 printf("\r");
@@ -130,7 +126,7 @@ void* write_message_handler(void* client_state_ptr){
                 printf("\rEnter a message (max size %zu, quit to end): %s", MAX_MESSAGE_SIZE, msg);
                 real_size--;
                 i -= 2;
-            } else if (isprint(c)){
+            } else if ((isalnum(c) || ispunct(c)) && !iscntrl(c)){
                 msg[i] = c;
                 msg[i+1] = '\0';
                 real_size++;
